@@ -525,7 +525,7 @@ function render() {
   const monthEntries = getEntriesForPeriod(state.selectedYear, state.selectedMonth)
     .sort((a,b) => b.date.localeCompare(a.date));
 
-  const SHOW_LIMIT = 10;
+  const SHOW_LIMIT = 3;
   const visibleEntries = state.showAllEntries ? monthEntries : monthEntries.slice(0, SHOW_LIMIT);
   if(monthEntries.length===0) {
     logSection.appendChild(div({class:'empty'},'No entries for this month'));
