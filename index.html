@@ -350,6 +350,15 @@ function render() {
   dateGroup.appendChild(el('label',{},'Date'));
   const dateIn = el('input',{type:'date',class:'date-input'}); dateIn.value = window._prefilledDate || yesterday();
   dateGroup.appendChild(dateIn);
+
+  // Show notice if the default date is not yet logged
+  const defaultDate = window._prefilledDate || yesterday();
+  if(!state.entries.find(e => e.date === defaultDate)) {
+    const notice = div({style:'font-size:11px;color:#fbbf24;margin-top:4px;'});
+    notice.textContent = '⚠️ ' + defaultDate + ' not yet logged';
+    dateGroup.appendChild(notice);
+  }
+
   entryRow.appendChild(dateGroup);
 
   const typeGroup = div({class:'entry-group'});
