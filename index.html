@@ -274,7 +274,9 @@ function render() {
     b.onclick = () => { state.selectedYear = yr; render(); };
     yearToggle.appendChild(b);
   });
+  const exportBtn = btn('btn-sm', '⬇ Export CSV', exportCSV);
   hdr.appendChild(yearToggle);
+  hdr.appendChild(exportBtn);
   app.appendChild(hdr);
 
   // Gap warning
@@ -560,6 +562,18 @@ function render() {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
+function exportCSV() {
+  const rows = [['date','location','type']];
+  state.entries.slice().sort((a,b)=>a.date.localeCompare(b.date)).forEach(e => {
+    rows.push([e.date, e.location, e.type]);
+  });
+  const csv = rows.map(r => r.join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'location-tracker-' + new Date().toISOString().slice(0,10) + '.csv';
+  a.click();
+}
+
 async function init() {
   // Handle ?date= query param from daily email link
   const params = new URLSearchParams(window.location.search);
