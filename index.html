@@ -4,6 +4,7 @@
 
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Location Tracker</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='40' r='28' fill='%236366f1'/%3E%3Ccircle cx='50' cy='40' r='13' fill='white'/%3E%3Cellipse cx='50' cy='95' rx='12' ry='6' fill='%236366f1' opacity='0.3'/%3E%3Cpolygon points='50,75 36,52 64,52' fill='%236366f1'/%3E%3C/svg%3E">
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0a0f1e; color: #e2e8f0; min-height: 100vh; }
@@ -82,6 +83,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
 .settings-row input, .settings-row select { font-family: inherit; font-size: 13px; color: #e2e8f0; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; padding: 5px 10px; outline: none; }
 .settings-row input:focus, .settings-row select:focus { border-color: #6366f1; }
 
+.gap-banner { background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.4); border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; font-size: 13px; color: #fbbf24; }
+
 /* Toast */
 .toast { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); background: #0f766e; color: #fff; padding: 9px 20px; border-radius: 999px; font-size: 13px; font-weight: 600; z-index: 200; box-shadow: 0 4px 20px rgba(0,0,0,0.4); white-space: nowrap; }
 
@@ -125,6 +128,7 @@ let state = {
   viewMode: 'month',  // 'month' | 'year'
   showImport: false,
   importText: '',
+  showAllEntries: false,
 };
 
 // ── DB ───────────────────────────────────────────────────────────────────────
@@ -209,6 +213,7 @@ function getAbroadDays(entries) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
 function today() { return new Date().toISOString().slice(0,10); }
+function yesterday() { const d = new Date(); d.setDate(d.getDate()-1); return d.toISOString().slice(0,10); }
 function showToast(msg) {
   const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
   document.body.appendChild(t); setTimeout(() => t.remove(), 3000);
@@ -224,6 +229,25 @@ function span(attrs={}, text='') { return el('span',attrs,text); }
 function btn(cls, label, onclick) {
   const b = el('button', {class:'btn '+(cls||'')});
   b.textContent = label; b.onclick = onclick; return b;
+}
+
+// ── Gap Checker ──────────────────────────────────────────────────────────
+function checkAndShowGaps(lastLoggedDate) {
+  const yr = new Date(lastLoggedDate + 'T12:00:00').getFullYear();
+  const start = new Date(yr, 0, 1);
+  const end = new Date(lastLoggedDate + 'T12:00:00');
+  const loggedDates = new Set(state.entries.filter(e => {
+    const d = new Date(e.date + 'T12:00:00');
+    return d.getFullYear() === yr;
+  }).map(e => e.date));
+  const missing = [];
+  for(let d = new Date(start); d <= end; d.setDate(d.getDate()+1)) {
+    const s = d.toISOString().slice(0,10);
+    if(!loggedDates.has(s)) missing.push(s);
+  }
+  if(missing.length === 0) return;
+  state._missingDays = missing;
+  state._showGapWarning = true;
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -252,6 +276,26 @@ function render() {
   });
   hdr.appendChild(yearToggle);
   app.appendChild(hdr);
+
+  // Gap warning
+  if(state._showGapWarning && state._missingDays?.length > 0) {
+    const banner = div({class:'gap-banner'});
+    const missing = state._missingDays;
+    banner.innerHTML = `⚠️ <strong>${missing.length} day${missing.length>1?'s':''} missing</strong> before your last entry: ${missing.slice(0,3).join(', ')}${missing.length>3?' …':''}`;
+    const fillDiv = div({style:'margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;'});
+    missing.slice(0,5).forEach(dt => {
+      const b = btn('btn-sm', dt, () => {
+        const di = document.querySelector('input[type=date]');
+        if(di) { di.value = dt; di.scrollIntoView({behavior:'smooth'}); }
+      });
+      fillDiv.appendChild(b);
+    });
+    const dismissBtn = btn('btn-sm', '✕ Dismiss', () => { state._showGapWarning=false; state._missingDays=[]; render(); });
+    dismissBtn.style.marginLeft='auto';
+    fillDiv.appendChild(dismissBtn);
+    banner.appendChild(fillDiv);
+    app.appendChild(banner);
+  }
 
   // Settings row
   const settingsRow = div({class:'settings-row'});
@@ -302,7 +346,7 @@ function render() {
 
   const dateGroup = div({class:'entry-group'});
   dateGroup.appendChild(el('label',{},'Date'));
-  const dateIn = el('input',{type:'date',class:'date-input'}); dateIn.value = today();
+  const dateIn = el('input',{type:'date',class:'date-input'}); dateIn.value = window._prefilledDate || yesterday();
   dateGroup.appendChild(dateIn);
   entryRow.appendChild(dateGroup);
 
@@ -481,10 +525,12 @@ function render() {
   const monthEntries = getEntriesForPeriod(state.selectedYear, state.selectedMonth)
     .sort((a,b) => b.date.localeCompare(a.date));
 
+  const SHOW_LIMIT = 10;
+  const visibleEntries = state.showAllEntries ? monthEntries : monthEntries.slice(0, SHOW_LIMIT);
   if(monthEntries.length===0) {
     logSection.appendChild(div({class:'empty'},'No entries for this month'));
   } else {
-    monthEntries.forEach(entry => {
+    visibleEntries.forEach(entry => {
       const row = div({class:'log-entry'});
       row.appendChild(div({class:'log-date'}, entry.date));
       row.appendChild(div({class:'log-location'}, entry.type==='abroad' ? '🌍 '+entry.location : '📍 '+(STATE_NAMES[entry.location]||entry.location)));
@@ -501,6 +547,13 @@ function render() {
       row.appendChild(acts);
       logSection.appendChild(row);
     });
+    if(monthEntries.length > SHOW_LIMIT) {
+      const toggleBtn = btn('btn-sm', state.showAllEntries ? '▲ Show Less' : `▼ Show More (${monthEntries.length - SHOW_LIMIT} more)`, () => {
+        state.showAllEntries = !state.showAllEntries; render();
+      });
+      toggleBtn.style.marginTop = '8px';
+      logSection.appendChild(toggleBtn);
+    }
   }
   app.appendChild(logSection);
   root.appendChild(app);
