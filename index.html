@@ -99,8 +99,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
 
 @media (max-width: 600px) {
   .stats-grid { grid-template-columns: 1fr; }
-  .entry-row { flex-direction: column; }
-  .entry-group input, .entry-group select { width: 100% !important; }
+  .entry-card { padding: 14px; }
+  .entry-card h2 { margin-bottom: 10px; }
+  .entry-row { flex-direction: column; gap: 8px; }
+  .entry-row-top { display: flex; gap: 8px; }
+  .entry-row-top .entry-group { flex: 1; min-width: 0; }
+  .entry-group input, .entry-group select { width: 100% !important; padding: 7px 10px; }
+  .btn-primary { width: 100%; margin-top: 4px; }
+  .summary-strip { gap: 6px; margin-bottom: 14px; }
+  .summary-pill { padding: 5px 10px; font-size: 11px; }
 }
 </style>
 </head>
@@ -348,6 +355,7 @@ function render() {
   entryCard.appendChild(el('h2',{},'Log a Day'));
   const entryRow = div({class:'entry-row'});
 
+  const topRow = div({class:'entry-row-top'});
   const dateGroup = div({class:'entry-group'});
   dateGroup.appendChild(el('label',{},'Date'));
   const dateIn = el('input',{type:'date',class:'date-input'}); dateIn.value = window._prefilledDate || yesterday();
@@ -361,14 +369,15 @@ function render() {
     dateGroup.appendChild(notice);
   }
 
-  entryRow.appendChild(dateGroup);
+  topRow.appendChild(dateGroup);
 
   const typeGroup = div({class:'entry-group'});
   typeGroup.appendChild(el('label',{},'Type'));
   const typeSel = el('select',{class:'type-select'});
   [['state','US State'],['abroad','Abroad']].forEach(([v,l]) => typeSel.appendChild(el('option',{value:v},l)));
   typeGroup.appendChild(typeSel);
-  entryRow.appendChild(typeGroup);
+  topRow.appendChild(typeGroup);
+  entryRow.appendChild(topRow);
 
   const locGroup = div({class:'entry-group'});
   locGroup.appendChild(el('label',{},'Location'));
