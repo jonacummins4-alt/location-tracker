@@ -113,16 +113,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
   .stats-grid { grid-template-columns: 1fr; }
   .entry-card { padding: 14px; }
   .entry-card h2 { margin-bottom: 10px; }
-  .entry-row { flex-direction: column; gap: 8px; align-items: stretch; }
   .entry-group input, .entry-group select { width: 100% !important; padding: 7px 10px; }
   .btn-primary { width: 100%; margin-top: 4px; }
   .summary-strip { gap: 6px; margin-bottom: 14px; }
   .summary-pill { padding: 5px 10px; font-size: 11px; }
 }
 @media (min-width: 500px) {
-  .entry-row-top { flex-direction: row; }
-  .entry-row-top .entry-group { flex: 1; }
-}
+    }
 </style>
 </head>
 <body>
@@ -374,29 +371,14 @@ function render() {
   entryCard.appendChild(el('h2',{},'Log a Day'));
   const entryRow = div({class:'entry-row'});
 
-  const topRow = div({class:'entry-row-top'});
-  const dateGroup = div({class:'entry-group'});
-  dateGroup.appendChild(el('label',{},'Date'));
-  const dateIn = el('input',{type:'date',class:'date-input'}); dateIn.value = window._prefilledDate || yesterday();
-  dateGroup.appendChild(dateIn);
-
-  // Show notice if the default date is not yet logged
-  const defaultDate = window._prefilledDate || yesterday();
-  if(!state.entries.find(e => e.date === defaultDate)) {
-    const notice = div({style:'font-size:11px;color:#fbbf24;margin-top:4px;'});
-    notice.textContent = '⚠️ ' + defaultDate + ' not yet logged';
-    dateGroup.appendChild(notice);
-  }
-
-  topRow.appendChild(dateGroup);
+  entryRow.appendChild(dateGroup);
 
   const typeGroup = div({class:'entry-group'});
   typeGroup.appendChild(el('label',{},'Type'));
   const typeSel = el('select',{class:'type-select'});
   [['state','US State'],['abroad','Abroad']].forEach(([v,l]) => typeSel.appendChild(el('option',{value:v},l)));
   typeGroup.appendChild(typeSel);
-  topRow.appendChild(typeGroup);
-  entryRow.appendChild(topRow);
+  entryRow.appendChild(typeGroup);
 
   const locGroup = div({class:'entry-group'});
   locGroup.appendChild(el('label',{},'Location'));
