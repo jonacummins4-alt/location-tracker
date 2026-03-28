@@ -378,7 +378,9 @@ function render() {
   const topRow = div({class:'entry-row-top'});
   const dateGroup = div({class:'entry-group'});
   dateGroup.appendChild(el('label',{},'Date'));
-  const dateIn = el('input',{type:'date',class:'date-input'}); dateIn.value = window._prefilledDate || yesterday();
+  const dateIn = el('input',{type:'date',class:'date-input'});
+  dateIn.style.width = '100%';
+  dateIn.style.boxSizing = 'border-box'; dateIn.value = window._prefilledDate || yesterday();
   dateGroup.appendChild(dateIn);
 
   // Show notice if the default date is not yet logged
@@ -394,6 +396,8 @@ function render() {
   const typeGroup = div({class:'entry-group'});
   typeGroup.appendChild(el('label',{},'Type'));
   const typeSel = el('select',{class:'type-select'});
+  typeSel.style.width = '100%';
+  typeSel.style.boxSizing = 'border-box';
   [['state','US State'],['abroad','Abroad']].forEach(([v,l]) => typeSel.appendChild(el('option',{value:v},l)));
   typeGroup.appendChild(typeSel);
   topRow.appendChild(typeGroup);
