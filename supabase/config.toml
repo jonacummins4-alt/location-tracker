@@ -1,0 +1,15 @@
+# Function flags only. This repo is not a linked Supabase project.
+# Do not run `supabase db push` from here. The lockdown SQL is in docs/
+# and is run by hand in the SQL editor, after the new pages are deployed.
+
+[functions.tracker-api]
+verify_jwt = false
+
+[functions.send-password-hint]
+verify_jwt = false
+
+[functions.location-reminder]
+verify_jwt = false
+
+[functions.location-reminder-wife]
+verify_jwt = false
