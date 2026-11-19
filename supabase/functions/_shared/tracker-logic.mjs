@@ -2,6 +2,8 @@
 // The browser never holds a Supabase key. This module checks a signed
 // session, then reads and writes with the service role.
 
+import { MAIL_FROM } from "./mail-from.mjs";
+
 export const PEOPLE = {
   jon: {
     entries: "location_entries",
@@ -16,6 +18,12 @@ export const PEOPLE = {
 export const SETTINGS_KEYS = ["home_state", "email_address", "location_email_hour"];
 export const LOGIN_RATE_KEY = "tracker_login_rate";
 export const LOGIN_CHALLENGE_KEY = "tracker_login_challenge";
+export const SESSION_VERSION_KEY = "tracker_session_version";
+
+export const ALLOWED_ORIGINS = {
+  "https://location-tracker-sand-six.vercel.app": "jon",
+  "https://location-tracker-wife.vercel.app": "amy",
+};
 
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const SESSION_REFRESH_WITHIN_MS = 15 * 24 * 60 * 60 * 1000;
@@ -43,17 +51,7 @@ export function tableFor(person) {
 
 export function personForOrigin(origin) {
   if (!origin) return null;
-  let host = "";
-  try {
-    host = new URL(origin).hostname;
-  } catch {
-    return null;
-  }
-  if (host === "localhost" || host === "127.0.0.1") return "any";
-  if (!host.endsWith(".vercel.app")) return null;
-  if (host === "location-tracker-wife.vercel.app" || host.startsWith("location-tracker-wife")) return "amy";
-  if (host.startsWith("location-tracker")) return "jon";
-  return null;
+  return ALLOWED_ORIGINS[origin] || null;
 }
 
 export function maskEmail(email) {
@@ -125,11 +123,13 @@ export async function hashCode(secret, person, code) {
   return hex(await hmac(secret, `code:${person}:${code}`));
 }
 
-export async function signSession(secret, person, nowMs) {
+export async function signSession(secret, person, nowMs, version = 0) {
   assertSecret(secret);
   if (!PEOPLE[person]) throw new Error("unknown person");
+  const sessionVersion = Number.isInteger(version) ? version : Number(version) || 0;
   const payload = {
     p: person,
+    sv: sessionVersion,
     iat: Math.floor(nowMs / 1000),
     exp: Math.floor((nowMs + SESSION_TTL_MS) / 1000),
   };
@@ -154,6 +154,7 @@ export async function verifySession(secret, token, nowMs) {
     return null;
   }
   if (!payload || !PEOPLE[payload.p]) return null;
+  if (typeof payload.sv !== "number" || !Number.isFinite(payload.sv)) return null;
   if (typeof payload.exp !== "number" || payload.exp * 1000 <= nowMs) return null;
   return payload;
 }
@@ -284,10 +285,12 @@ export function corsHeaders(origin) {
 }
 
 function originAllows(origin, person) {
-  const allowed = personForOrigin(origin);
-  if (!origin) return true;
-  if (allowed === "any") return true;
-  return allowed === person;
+  return personForOrigin(origin) === person;
+}
+
+export function postgrestEq(value) {
+  const escaped = String(value).replace(/"/g, '""');
+  return `eq."${escaped}"`;
 }
 
 async function readJson(req) {
@@ -326,7 +329,7 @@ async function ipHash(secret, ip) {
   return hex(await hmac(secret, `ip:${ip}`)).slice(0, 32);
 }
 
-function serviceKey(env) {
+export function serviceKey(env) {
   const legacy = env("SUPABASE_SERVICE_ROLE_KEY");
   if (legacy) return legacy;
   try {
@@ -338,21 +341,26 @@ function serviceKey(env) {
   return "";
 }
 
+export function restHeaders(env) {
+  const key = serviceKey(env);
+  const headers = {
+    apikey: key,
+    "content-type": "application/json",
+  };
+  if (key && key.split(".").length === 3) headers.authorization = `Bearer ${key}`;
+  return headers;
+}
+
 async function restFetch(env, fetchImpl, table, { method = "GET", query = {}, body, prefer } = {}) {
   const base = env("SUPABASE_URL");
-  const key = serviceKey(env);
-  if (!base || !key) {
+  const headers = restHeaders(env);
+  if (!base || !headers.apikey) {
     const err = new Error("database is not configured");
     err.status = 503;
     throw err;
   }
   const url = new URL(`${base.replace(/\/$/, "")}/rest/v1/${table}`);
   for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
-  const headers = {
-    apikey: key,
-    "content-type": "application/json",
-  };
-  if (key.split(".").length === 3) headers.authorization = `Bearer ${key}`;
   if (prefer) headers.prefer = prefer;
   const res = await fetchImpl(url.toString(), {
     method,
@@ -460,6 +468,39 @@ export function createSupabaseDb(env, fetchImpl) {
         prefer: "return=minimal",
       });
     },
+    async compareAndSwapSetting(person, key, oldValue, newValue) {
+      const table = tableFor(person).settings;
+      const rows = await restFetch(env, fetchImpl, table, {
+        method: "PATCH",
+        query: { key: `eq.${key}`, value: postgrestEq(oldValue) },
+        body: { value: newValue, updated_at: new Date().toISOString() },
+        prefer: "return=representation",
+      });
+      return Array.isArray(rows) && rows.length > 0;
+    },
+    async insertSettingIfAbsent(person, key, value) {
+      const table = tableFor(person).settings;
+      try {
+        const rows = await restFetch(env, fetchImpl, table, {
+          method: "POST",
+          body: { key, value, updated_at: new Date().toISOString() },
+          prefer: "return=representation",
+        });
+        return Array.isArray(rows) && rows.length > 0;
+      } catch (err) {
+        if (err.status === 409) return false;
+        throw err;
+      }
+    },
+    async deleteSettingIfMatch(person, key, oldValue) {
+      const table = tableFor(person).settings;
+      const rows = await restFetch(env, fetchImpl, table, {
+        method: "DELETE",
+        query: { key: `eq.${key}`, value: postgrestEq(oldValue) },
+        prefer: "return=representation",
+      });
+      return Array.isArray(rows) && rows.length > 0;
+    },
   };
 }
 
@@ -478,7 +519,7 @@ async function sendCodeEmail(env, fetchImpl, to, code) {
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      from: "Location Tracker <noreply@bulldogonline.com>",
+      from: MAIL_FROM,
       to: [to],
       subject: "Your location tracker sign-in code",
       html,
@@ -500,8 +541,14 @@ export function createProductionDeps(deps) {
   };
 }
 
+async function currentSessionVersion(db, person) {
+  const raw = (await db.getSettings(person, [SESSION_VERSION_KEY]))[SESSION_VERSION_KEY];
+  const version = Number(raw || 0);
+  return Number.isFinite(version) ? version : 0;
+}
+
 async function requireSession(req, deps, origin) {
-  const secret = deps.env("TRACKER_SESSION_SECRET");
+  const secret = deps.env("LOCATION_SESSION_SECRET");
   const payload = await verifySession(secret, bearerToken(req), deps.now());
   if (!payload) {
     const err = new Error("Sign in required.");
@@ -513,9 +560,15 @@ async function requireSession(req, deps, origin) {
     err.status = 403;
     throw err;
   }
+  const version = await currentSessionVersion(deps.db, payload.p);
+  if (payload.sv !== version) {
+    const err = new Error("Sign in required.");
+    err.status = 401;
+    throw err;
+  }
   let token = "";
   if (payload.exp * 1000 - deps.now() < SESSION_REFRESH_WITHIN_MS) {
-    token = await signSession(secret, payload.p, deps.now());
+    token = await signSession(secret, payload.p, deps.now(), version);
   }
   return { person: payload.p, token };
 }
@@ -529,7 +582,7 @@ export async function handleRequest(req, deps) {
     if (req.method !== "POST") return json({ error: "Method not allowed." }, 405, origin);
     const body = await readJson(req);
     const action = body.action;
-    const secret = deps.env("TRACKER_SESSION_SECRET");
+    const secret = deps.env("LOCATION_SESSION_SECRET");
 
     if (action === "health") {
       return json({
@@ -552,6 +605,10 @@ export async function handleRequest(req, deps) {
     const session = await requireSession(req, deps, origin);
     if (action === "session") {
       return json({ ok: true, person: session.person, ...(session.token ? { token: session.token } : {}) }, 200, origin);
+    }
+    if (action === "sign-out") {
+      await bumpSessionVersion(deps.db, session.person);
+      return json({ ok: true }, 200, origin);
     }
     if (action === "list-entries") {
       const entries = await deps.db.listEntries(session.person);
@@ -591,14 +648,41 @@ export async function handleRequest(req, deps) {
   }
 }
 
+async function compareAndSet(db, person, key, oldRaw, newRaw) {
+  if (oldRaw == null) return db.insertSettingIfAbsent(person, key, newRaw);
+  return db.compareAndSwapSetting(person, key, oldRaw, newRaw);
+}
+
+async function commitRate(db, person, ipHashValue, nowMs) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const raw = (await db.getSettings(person, [LOGIN_RATE_KEY]))[LOGIN_RATE_KEY] ?? null;
+    const decision = decideSend(parseStored(raw), ipHashValue, nowMs);
+    if (!decision.ok) return decision;
+    const wrote = await compareAndSet(db, person, LOGIN_RATE_KEY, raw, JSON.stringify(decision.next));
+    if (wrote) return decision;
+  }
+  return { ok: false, status: 429, error: "Too many codes were sent. Try again in an hour." };
+}
+
+async function bumpSessionVersion(db, person) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const raw = (await db.getSettings(person, [SESSION_VERSION_KEY]))[SESSION_VERSION_KEY] ?? null;
+    const next = String((Number(raw) || 0) + 1);
+    const wrote = await compareAndSet(db, person, SESSION_VERSION_KEY, raw, next);
+    if (wrote) return Number(next);
+  }
+  const err = new Error("Could not sign out. Try again.");
+  err.status = 409;
+  throw err;
+}
+
 async function requestCode(person, req, deps, origin, secret) {
   const settings = await deps.db.getSettings(person, ["email_address"]);
   const email = settings.email_address || "";
   if (!email || email === "your@email.com") {
     return json({ error: "No email is saved for this tracker yet." }, 400, origin);
   }
-  const rateRaw = await deps.db.getSettings(person, [LOGIN_RATE_KEY]);
-  const decision = decideSend(parseStored(rateRaw[LOGIN_RATE_KEY]), await ipHash(secret, clientIp(req)), deps.now());
+  const decision = await commitRate(deps.db, person, await ipHash(secret, clientIp(req)), deps.now());
   if (!decision.ok) return json({ error: decision.error }, decision.status, origin);
   const code = randomCode();
   const challenge = {
@@ -606,38 +690,56 @@ async function requestCode(person, req, deps, origin, secret) {
     exp: deps.now() + CODE_TTL_MS,
     attempts: 0,
   };
-  await deps.db.upsertSetting(person, LOGIN_RATE_KEY, JSON.stringify(decision.next));
-  await deps.db.upsertSetting(person, LOGIN_CHALLENGE_KEY, JSON.stringify(challenge));
+  const challengeRaw = JSON.stringify(challenge);
+  let stored = false;
+  for (let attempt = 0; attempt < 3 && !stored; attempt++) {
+    const current = (await deps.db.getSettings(person, [LOGIN_CHALLENGE_KEY]))[LOGIN_CHALLENGE_KEY] ?? null;
+    stored = await compareAndSet(deps.db, person, LOGIN_CHALLENGE_KEY, current, challengeRaw);
+  }
+  if (!stored) return json({ error: "Too many codes were sent. Try again in an hour." }, 429, origin);
   await deps.sendCode(email, code);
   return json({ ok: true, masked: maskEmail(email) }, 200, origin);
 }
 
 async function verifyCode(person, code, deps, origin, secret) {
   const submitted = String(code || "").trim();
-  const storedRaw = await deps.db.getSettings(person, [LOGIN_CHALLENGE_KEY]);
-  const challenge = parseStored(storedRaw[LOGIN_CHALLENGE_KEY]);
-  if (!challenge || typeof challenge.exp !== "number" || challenge.exp <= deps.now()) {
-    return json({ error: "That code is expired. Request a new one." }, 401, origin);
-  }
-  const attempts = Number(challenge.attempts) || 0;
-  if (attempts >= MAX_VERIFY_ATTEMPTS) {
-    await deps.db.deleteSetting(person, LOGIN_CHALLENGE_KEY);
-    return json({ error: "That code is expired. Request a new one." }, 401, origin);
-  }
-  const expected = typeof challenge.hash === "string" ? challenge.hash : "";
   const actual = /^[0-9]{6}$/.test(submitted) ? await hashCode(secret, person, submitted) : "";
-  if (!expected || !actual || !timingSafeEqual(expected, actual)) {
-    challenge.attempts = attempts + 1;
-    if (challenge.attempts >= MAX_VERIFY_ATTEMPTS) {
-      await deps.db.deleteSetting(person, LOGIN_CHALLENGE_KEY);
-    } else {
-      await deps.db.upsertSetting(person, LOGIN_CHALLENGE_KEY, JSON.stringify(challenge));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const raw = (await deps.db.getSettings(person, [LOGIN_CHALLENGE_KEY]))[LOGIN_CHALLENGE_KEY] ?? null;
+    const challenge = parseStored(raw);
+    if (!raw || !challenge || typeof challenge.exp !== "number" || challenge.exp <= deps.now()) {
+      return json({ error: "That code is expired. Request a new one." }, 401, origin);
     }
-    return json({ error: "That code is not valid." }, 401, origin);
+    const attempts = Number(challenge.attempts) || 0;
+    if (attempts >= MAX_VERIFY_ATTEMPTS) {
+      await deps.db.deleteSettingIfMatch(person, LOGIN_CHALLENGE_KEY, raw);
+      return json({ error: "That code is expired. Request a new one." }, 401, origin);
+    }
+    const expected = typeof challenge.hash === "string" ? challenge.hash : "";
+    const matches = Boolean(expected && actual && timingSafeEqual(expected, actual));
+    if (!matches) {
+      const nextAttempts = attempts + 1;
+      if (nextAttempts >= MAX_VERIFY_ATTEMPTS) {
+        const removed = await deps.db.deleteSettingIfMatch(person, LOGIN_CHALLENGE_KEY, raw);
+        if (removed) return json({ error: "That code is expired. Request a new one." }, 401, origin);
+        continue;
+      }
+      const wrote = await deps.db.compareAndSwapSetting(
+        person,
+        LOGIN_CHALLENGE_KEY,
+        raw,
+        JSON.stringify({ ...challenge, attempts: nextAttempts }),
+      );
+      if (wrote) return json({ error: "That code is not valid." }, 401, origin);
+      continue;
+    }
+    const removed = await deps.db.deleteSettingIfMatch(person, LOGIN_CHALLENGE_KEY, raw);
+    if (!removed) continue;
+    const version = await currentSessionVersion(deps.db, person);
+    const token = await signSession(secret, person, deps.now(), version);
+    return json({ ok: true, token, person }, 200, origin);
   }
-  await deps.db.deleteSetting(person, LOGIN_CHALLENGE_KEY);
-  const token = await signSession(secret, person, deps.now());
-  return json({ ok: true, token, person }, 200, origin);
+  return json({ error: "That code is not valid." }, 401, origin);
 }
 
 async function saveEntry(db, person, entry) {

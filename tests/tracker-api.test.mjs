@@ -67,6 +67,24 @@ function memoryDb() {
       calls.push(["delete-setting", person, key]);
       delete data[person].settings[key];
     },
+    async compareAndSwapSetting(person, key, oldValue, newValue) {
+      calls.push(["cas", person, key]);
+      if (data[person].settings[key] !== oldValue) return false;
+      data[person].settings[key] = newValue;
+      return true;
+    },
+    async insertSettingIfAbsent(person, key, value) {
+      calls.push(["insert-setting", person, key]);
+      if (data[person].settings[key] != null) return false;
+      data[person].settings[key] = value;
+      return true;
+    },
+    async deleteSettingIfMatch(person, key, oldValue) {
+      calls.push(["delete-match", person, key]);
+      if (data[person].settings[key] !== oldValue) return false;
+      delete data[person].settings[key];
+      return true;
+    },
   };
 }
 
@@ -78,7 +96,7 @@ function deps(extra = {}) {
     sent,
     env(name) {
       const values = {
-        TRACKER_SESSION_SECRET: SECRET,
+        LOCATION_SESSION_SECRET: SECRET,
         RESEND_API_KEY: "set",
         SUPABASE_URL: "https://example.supabase.co",
         SUPABASE_SERVICE_ROLE_KEY: "set",
@@ -106,9 +124,10 @@ async function post(action, body, { token = "", origin = ORIGIN, d = deps() } = 
 
 test("origin binding keeps the two sites apart", () => {
   assert.equal(personForOrigin(ORIGIN), "jon");
-  assert.equal(personForOrigin("https://location-tracker-sand-six-git-branch-team.vercel.app"), "jon");
+  assert.equal(personForOrigin("https://location-tracker-sand-six-git-branch-team.vercel.app"), null);
   assert.equal(personForOrigin(AMY_ORIGIN), "amy");
-  assert.equal(personForOrigin("https://location-tracker-wife-git-branch-team.vercel.app"), "amy");
+  assert.equal(personForOrigin("https://location-tracker-wife-git-branch-team.vercel.app"), null);
+  assert.equal(personForOrigin("http://localhost:3000"), null);
   assert.equal(personForOrigin("https://evil.example"), null);
   assert.equal(tableFor("jon").entries, "location_entries");
   assert.equal(tableFor("amy").settings, "user_settings_wife");
@@ -134,7 +153,7 @@ test("a Jon session cannot read or write Amy's rows", async () => {
   const listed = await post("list-entries", { person: "amy" }, { token, d });
   assert.equal(listed.status, 200);
   assert.deepEqual(listed.body.entries, []);
-  assert.deepEqual(d.db.calls[0], ["list", "jon"]);
+  assert.deepEqual(d.db.calls.find((row) => row[0] === "list"), ["list", "jon"]);
 
   const saved = await post("upsert-entry", {
     person: "amy",
@@ -227,7 +246,7 @@ test("entry validation and same-day update stay on that person's table", async (
 test("unauthenticated data calls and a missing secret fail closed", async () => {
   const open = await post("list-entries", {});
   assert.equal(open.status, 401);
-  const d = deps({ env: { TRACKER_SESSION_SECRET: "short" } });
+  const d = deps({ env: { LOCATION_SESSION_SECRET: "short" } });
   const health = await post("health", {}, { d });
   assert.equal(health.body.session, false);
   const code = await post("request-code", { person: "jon" }, { d });
@@ -283,6 +302,8 @@ test("lockdown SQL drops location anon access and the settings stopgap", () => {
   assert.match(sql, /drop policy if exists anon_all_wife_settings on public.user_settings_wife/i);
   assert.match(sql, /home_state/);
   assert.match(sql, /location_email_hour/);
+  assert.match(sql, /user#_settings#_location#_%/);
+  assert.match(sql, /PR 39 supabase\/lock-anon-access.sql FIRST/i);
   assert.match(sql, /anon_all_user_settings/);
   assert.equal(sql.includes("eyJ"), false);
   assert.match(rollback, /create policy "Allow anon all"/i);
@@ -294,4 +315,33 @@ test("lockdown SQL drops location anon access and the settings stopgap", () => {
 test("settings patch rejects a blank email", () => {
   assert.equal(Boolean(validateSettingsPatch({ email_address: "" }).error), true);
   assert.equal(validateSettingsPatch({ location_email_hour: 24 }).error.includes("hour"), true);
+});
+
+test("parallel wrong codes cannot pass the five-guess limit", async () => {
+  const d = deps();
+  await post("request-code", { person: "jon" }, { d });
+  const results = await Promise.all(Array.from({ length: 10 }, () => (
+    post("verify-code", { person: "jon", code: "000000" }, { d })
+  )));
+  assert.equal(results.filter((row) => row.body.error === "That code is not valid.").length, 4);
+  assert.equal(results.filter((row) => row.body.error === "That code is expired. Request a new one.").length, 6);
+  assert.equal(d.db.data.jon.settings[LOGIN_CHALLENGE_KEY], undefined);
+});
+
+test("parallel code requests count as one send inside the same minute", async () => {
+  const d = deps();
+  const results = await Promise.all(Array.from({ length: 6 }, () => post("request-code", { person: "jon" }, { d })));
+  assert.equal(results.filter((row) => row.status === 200).length, 1);
+  assert.equal(d.sent.length, 1);
+});
+
+test("sign-out bumps the session version and the old token stops working", async () => {
+  const d = deps();
+  await post("request-code", { person: "jon" }, { d });
+  const verified = await post("verify-code", { person: "jon", code: d.sent[0].code }, { d });
+  const token = verified.body.token;
+  assert.equal((await post("list-entries", {}, { token, d })).status, 200);
+  assert.equal((await post("sign-out", {}, { token, d })).status, 200);
+  assert.equal(d.db.data.jon.settings.tracker_session_version, "1");
+  assert.equal((await post("list-entries", {}, { token, d })).status, 401);
 });

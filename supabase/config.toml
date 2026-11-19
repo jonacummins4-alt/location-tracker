@@ -7,3 +7,9 @@ verify_jwt = false
 
 [functions.send-password-hint]
 verify_jwt = false
+
+[functions.location-reminder]
+verify_jwt = false
+
+[functions.location-reminder-wife]
+verify_jwt = false
